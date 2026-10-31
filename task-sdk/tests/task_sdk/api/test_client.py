@@ -531,6 +531,37 @@ class TestTaskInstanceOperations:
 
         assert bodies[0]["loop_decision"] == {"stop": False, "reason": "error 0.2"}
 
+    @pytest.mark.parametrize(
+        ("method", "kwargs"),
+        [
+            pytest.param(
+                "finish", {"state": TerminalTIState.FAILED, "when": "2024-10-31T12:00:00Z"}, id="finish"
+            ),
+            pytest.param("retry", {"end_date": "2024-10-31T12:00:00Z"}, id="retry"),
+            pytest.param(
+                "succeed",
+                {"when": "2024-10-31T12:00:00Z", "task_outlets": [], "outlet_events": []},
+                id="succeed",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("callbacks_ran", [True, False])
+    def test_task_instance_final_state_reports_callbacks_not_run(self, method, kwargs, callbacks_ran):
+        """A worker that could not run the task's callbacks says so; the default leaves the field alone."""
+        ti_id = uuid6.uuid7()
+        bodies = []
+
+        def handle_request(request: httpx2.Request) -> httpx2.Response:
+            bodies.append(json.loads(request.read()))
+            return httpx2.Response(status_code=204)
+
+        client = make_client(transport=httpx2.MockTransport(handle_request))
+        getattr(client.task_instances, method)(
+            ti_id, rendered_map_index=None, callbacks_ran=callbacks_ran, **kwargs
+        )
+
+        assert bodies[0].get("callbacks_ran", True) is callbacks_ran
+
     def test_task_instance_heartbeat(self):
         # Simulate a successful response from the server that sends a heartbeat for a ti
         ti_id = uuid6.uuid7()

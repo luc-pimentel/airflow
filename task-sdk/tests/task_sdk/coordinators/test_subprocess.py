@@ -41,7 +41,7 @@ from uuid6 import uuid7
 
 from airflow.dag_processing.bundles.base import BaseDagBundle, BundleVersion
 from airflow.sdk.api.client import Client, TaskInstanceOperations
-from airflow.sdk.api.datamodels._generated import BundleInfo, TaskInstance, TIRunContext
+from airflow.sdk.api.datamodels._generated import BundleInfo, TaskInstance, TaskInstanceState, TIRunContext
 from airflow.sdk.coordinators._dag_importer import CoordinatorDagImporter
 from airflow.sdk.coordinators._subprocess import (
     SubprocessCoordinator,
@@ -55,7 +55,7 @@ from airflow.sdk.coordinators._subprocess import (
     _start_server,
     log,
 )
-from airflow.sdk.execution_time.comms import SetTaskStateStore
+from airflow.sdk.execution_time.comms import RetryTask, SetTaskStateStore, SucceedTask, TaskState
 from airflow.sdk.execution_time.coordinator import BaseCoordinator, TaskLaunchError
 from airflow.sdk.execution_time.supervisor import ActivitySubprocess
 from airflow.sdk.importers import DagSourceCode, reset_importer_registry
@@ -1020,6 +1020,69 @@ class TestPopenActivitySubprocessSetTaskStateStore:
             )
         else:
             process_log.warning.assert_not_called()
+
+
+class TestPopenActivitySubprocessTaskCallbacks:
+    """A language SDK runtime cannot run the Python callbacks of its task, so the final state says so."""
+
+    END_DATE = datetime(2026, 10, 31, 12, tzinfo=UTC)
+
+    @pytest.fixture
+    def proc(self):
+        proc = _PopenActivitySubprocess(
+            process_log=MagicMock(),
+            id=uuid7(),
+            pid=12345,
+            stdin=MagicMock(),
+            process=MagicMock(),
+            client=MagicMock(spec=Client),
+            comm_server=MagicMock(spec=socket.socket),
+            logs_server=MagicMock(spec=socket.socket),
+        )
+        with patch.object(_PopenActivitySubprocess, "send_msg", autospec=True):
+            yield proc
+
+    def test_success_reports_that_the_callbacks_did_not_run(self, proc):
+        proc._handle_request(SucceedTask(end_date=self.END_DATE), log=MagicMock(), req_id=1)
+
+        assert proc.client.task_instances.succeed.call_args.kwargs["callbacks_ran"] is False
+
+    @pytest.mark.parametrize(
+        ("msg", "method"),
+        [
+            pytest.param(TaskState(state=TaskInstanceState.FAILED, end_date=END_DATE), "finish", id="failed"),
+            pytest.param(RetryTask(end_date=END_DATE), "retry", id="up_for_retry"),
+        ],
+    )
+    def test_failure_and_retry_report_that_the_callbacks_did_not_run(self, proc, msg, method):
+        proc._handle_request(msg, log=MagicMock(), req_id=1)
+        proc._exit_code = 0
+
+        proc.update_task_state_if_needed()
+
+        assert getattr(proc.client.task_instances, method).call_args.kwargs["callbacks_ran"] is False
+
+    def test_a_runtime_that_exits_without_a_state_reports_that_the_callbacks_did_not_run(self, proc):
+        proc._exit_code = 1
+
+        proc.update_task_state_if_needed()
+
+        assert proc.client.task_instances.finish.call_args.kwargs["state"] == TaskInstanceState.FAILED
+        assert proc.client.task_instances.finish.call_args.kwargs["callbacks_ran"] is False
+
+    def test_a_python_task_process_says_nothing_about_its_callbacks(self):
+        proc = ActivitySubprocess(
+            process_log=MagicMock(),
+            id=uuid7(),
+            pid=12345,
+            stdin=MagicMock(),
+            process=MagicMock(),
+            client=MagicMock(spec=Client),
+        )
+        with patch.object(ActivitySubprocess, "send_msg", autospec=True):
+            proc._handle_request(SucceedTask(end_date=self.END_DATE), log=MagicMock(), req_id=1)
+
+        assert "callbacks_ran" not in proc.client.task_instances.succeed.call_args.kwargs
 
 
 # This script connects back to the supervisor the way a language SDK runtime does, then waits for

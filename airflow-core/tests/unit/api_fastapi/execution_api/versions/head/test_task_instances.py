@@ -58,10 +58,12 @@ from airflow.api_fastapi.execution_api.datamodels.token import ExecutionToken, T
 from airflow.api_fastapi.execution_api.routes import task_instances as task_instances_route
 from airflow.api_fastapi.execution_api.routes.task_instances import _emit_task_span, ti_update_state
 from airflow.api_fastapi.execution_api.security import require_auth
+from airflow.callbacks.callback_requests import TaskCallbackRequest
 from airflow.exceptions import AirflowSkipException, TaskNotFound
 from airflow.jobs.scheduler_job_runner import SchedulerJobRunner
 from airflow.models import DagRun, RenderedTaskInstanceFields, TaskReschedule, Trigger
 from airflow.models.asset import AssetActive, AssetAliasModel, AssetEvent, AssetModel
+from airflow.models.callback import DagProcessorCallback
 from airflow.models.dag import DagModel
 from airflow.models.dag_version import DagVersion
 from airflow.models.dagbag import DBDagBag
@@ -4713,6 +4715,87 @@ class TestTIUpdateState:
         session.refresh(ti)
         assert ti.state == State.SUCCESS
         assert ti.end_date == DEFAULT_END_DATE
+
+    @pytest.mark.parametrize(
+        ("state", "callback", "callback_type"),
+        [
+            pytest.param("success", "on_success_callback", TaskInstanceState.SUCCESS, id="success"),
+            pytest.param("failed", "on_failure_callback", TaskInstanceState.FAILED, id="failed"),
+            pytest.param(
+                "up_for_retry", "on_retry_callback", TaskInstanceState.UP_FOR_RETRY, id="up_for_retry"
+            ),
+        ],
+    )
+    def test_ti_update_state_requests_the_callbacks_the_worker_did_not_run(
+        self, client, session, dag_maker, state, callback, callback_type
+    ):
+        """A final state reported with callbacks_ran=False queues the task's callback for the Dag processor."""
+        with dag_maker(dag_id="test_callbacks_not_run", serialized=True):
+            EmptyOperator(task_id="stub", **{callback: lambda context: None})
+
+        dr = dag_maker.create_dagrun()
+        ti = dr.get_task_instance(task_id="stub", session=session)
+        ti.state = State.RUNNING
+        ti.start_date = DEFAULT_START_DATE
+        session.commit()
+        ti_id, try_number = ti.id, ti.try_number
+
+        response = client.patch(
+            f"/execution/task-instances/{ti_id}/state",
+            json={"state": state, "end_date": DEFAULT_END_DATE.isoformat(), "callbacks_ran": False},
+        )
+
+        assert response.status_code == 204
+        (row,) = session.scalars(select(DagProcessorCallback)).all()
+        request = row.get_callback_request()
+        assert isinstance(request, TaskCallbackRequest)
+        assert (request.ti.id, request.ti.try_number) == (ti_id, try_number)
+        assert request.task_callback_type == callback_type
+        assert request.filepath == dr.dag_model.relative_fileloc
+        assert request.bundle_name == dr.dag_model.bundle_name
+        assert request.context_from_server is not None
+        assert request.context_from_server.dag_run.run_id == dr.run_id
+
+    def test_ti_update_state_requests_no_callback_the_task_does_not_declare(self, client, session, dag_maker):
+        with dag_maker(dag_id="test_callbacks_not_declared", serialized=True):
+            EmptyOperator(task_id="stub", on_success_callback=lambda context: None)
+
+        dr = dag_maker.create_dagrun()
+        ti = dr.get_task_instance(task_id="stub", session=session)
+        ti.state = State.RUNNING
+        ti.start_date = DEFAULT_START_DATE
+        session.commit()
+
+        response = client.patch(
+            f"/execution/task-instances/{ti.id}/state",
+            json={"state": "failed", "end_date": DEFAULT_END_DATE.isoformat(), "callbacks_ran": False},
+        )
+
+        assert response.status_code == 204
+        assert session.scalars(select(DagProcessorCallback)).all() == []
+        session.expire_all()
+        assert session.get(TaskInstance, ti.id).state == State.FAILED
+
+    def test_ti_update_state_leaves_the_callbacks_to_the_worker_by_default(self, client, session, dag_maker):
+        """Without the flag the Dag is not loaded and nothing is queued: the task process ran its callbacks."""
+        with dag_maker(dag_id="test_callbacks_ran", serialized=True):
+            EmptyOperator(task_id="task", on_success_callback=lambda context: None)
+
+        dr = dag_maker.create_dagrun()
+        ti = dr.get_task_instance(task_id="task", session=session)
+        ti.state = State.RUNNING
+        ti.start_date = DEFAULT_START_DATE
+        session.commit()
+
+        with mock.patch("airflow.models.dagbag.DBDagBag.get_dag_for_run", autospec=True) as mock_get_dag:
+            response = client.patch(
+                f"/execution/task-instances/{ti.id}/state",
+                json={"state": "success", "end_date": DEFAULT_END_DATE.isoformat()},
+            )
+
+        assert response.status_code == 204
+        mock_get_dag.assert_not_called()
+        assert session.scalars(select(DagProcessorCallback)).all() == []
 
     def test_ti_update_state_to_failed_without_fail_fast(self, client, session, dag_maker):
         """Test that SerializedDAG is NOT loaded when fail_fast=False (default)."""

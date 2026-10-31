@@ -1740,16 +1740,21 @@ class TestExecuteTaskCallbacks:
         assert "dag_run" in context_received
         assert "logical_date" in context_received
 
-    def test_execute_task_callbacks_not_failure_callback(self, spy_agency):
-        """Test _execute_task_callbacks when request is not a failure callback"""
+    def test_execute_task_callbacks_success_callback(self, spy_agency):
+        """A success request runs on_success_callback, as the server sends for a task a language SDK ran."""
         called = False
+        context_received = None
+
+        def on_success(context):
+            nonlocal called, context_received
+            called = True
+            context_received = context
 
         def on_failure(context):
-            nonlocal called
-            called = True
+            raise AssertionError("on_failure_callback must not run for a success")
 
         with DAG(dag_id="test_dag") as dag:
-            BaseOperator(task_id="test_task", on_failure_callback=on_failure)
+            BaseOperator(task_id="test_task", on_success_callback=on_success, on_failure_callback=on_failure)
 
         def fake_collect_dags(self, *args, **kwargs):
             self.dags[dag.dag_id] = dag
@@ -1781,8 +1786,50 @@ class TestExecuteTaskCallbacks:
         log = structlog.get_logger()
         _execute_task_callbacks(dagbag, request, log)
 
-        # Should not call the callback since it's not a failure callback
-        assert called is False
+        assert called is True
+        assert context_received is not None
+        assert context_received["dag"] == dag
+        assert "ti" in context_received
+
+    def test_execute_task_callbacks_state_without_a_task_callback(self, spy_agency):
+        """A request for a state that has no task callback runs nothing."""
+
+        def on_any(context):
+            raise AssertionError("no callback must run for a skipped task")
+
+        with DAG(dag_id="test_dag") as dag:
+            BaseOperator(
+                task_id="test_task",
+                on_success_callback=on_any,
+                on_failure_callback=on_any,
+                on_retry_callback=on_any,
+            )
+
+        def fake_collect_dags(self, *args, **kwargs):
+            self.dags[dag.dag_id] = dag
+
+        spy_agency.spy_on(DagBag.collect_dags, call_fake=fake_collect_dags, owner=DagBag)
+
+        dagbag = DagBag()
+        dagbag.collect_dags()
+
+        request = TaskCallbackRequest(
+            filepath="test.py",
+            msg="Task skipped",
+            ti=TIDataModel(
+                id=uuid.uuid4(),
+                dag_id="test_dag",
+                task_id="test_task",
+                run_id="test_run",
+                try_number=1,
+                dag_version_id=uuid.uuid4(),
+            ),
+            bundle_name="testing",
+            bundle_version=None,
+            task_callback_type=TaskInstanceState.SKIPPED,
+        )
+
+        _execute_task_callbacks(dagbag, request, structlog.get_logger())
 
     def test_execute_task_callbacks_multiple_callbacks(self, spy_agency):
         """Test _execute_task_callbacks with multiple callbacks"""

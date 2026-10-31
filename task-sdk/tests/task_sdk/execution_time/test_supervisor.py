@@ -382,6 +382,7 @@ class TestSuperviseTaskLaunchError:
             when=mock.ANY,
             rendered_map_index=None,
             retry_reason="no jar for 'extract'",
+            callbacks_ran=False,
         )
         client.task_instances.retry.assert_not_called()
 
@@ -394,7 +395,11 @@ class TestSuperviseTaskLaunchError:
 
         assert exit_code == 1
         client.task_instances.retry.assert_called_once_with(
-            ti.id, end_date=mock.ANY, rendered_map_index=None, retry_reason="no jar for 'extract'"
+            ti.id,
+            end_date=mock.ANY,
+            rendered_map_index=None,
+            retry_reason="no jar for 'extract'",
+            callbacks_ran=False,
         )
         client.task_instances.finish.assert_not_called()
 
@@ -412,6 +417,7 @@ class TestSuperviseTaskLaunchError:
             when=mock.ANY,
             rendered_map_index=None,
             retry_reason="wrong coordinator",
+            callbacks_ran=False,
         )
         client.task_instances.retry.assert_not_called()
 
