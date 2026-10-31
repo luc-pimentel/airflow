@@ -200,5 +200,6 @@ capabilities:
       supported: false
       note: "no SDK-defined task callbacks"
     stub-task-handler:
-      supported: false
-      note: "a Python-declared task callback does not run for a stub task"
+      supported: true
+      since: "3.5.0"
+      note: "the Dag processor runs the Python-declared callbacks of a stub task"

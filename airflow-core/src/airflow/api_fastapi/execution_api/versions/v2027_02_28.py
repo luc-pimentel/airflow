@@ -17,7 +17,9 @@
 
 from __future__ import annotations
 
-from cadwyn import VersionChange, endpoint
+from cadwyn import VersionChange, endpoint, schema
+
+from airflow.api_fastapi.execution_api.datamodels.taskinstance import TIStateUpdateParams
 
 
 class AddDagProcessorJobEndpoints(VersionChange):
@@ -30,4 +32,14 @@ class AddDagProcessorJobEndpoints(VersionChange):
         endpoint("/jobs/{job_id}/heartbeat", ["POST"]).didnt_exist,
         endpoint("/jobs/{job_id}/complete", ["POST"]).didnt_exist,
         endpoint("/jobs/{job_id}/parse-token", ["POST"]).didnt_exist,
+    )
+
+
+class AddRequestCallbacksParam(VersionChange):
+    """Add the `request_callbacks` query parameter of a state update whose task callbacks the worker could not run."""
+
+    description = __doc__
+
+    instructions_to_migrate_to_previous_version = (
+        schema(TIStateUpdateParams).field("request_callbacks").didnt_exist,
     )

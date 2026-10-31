@@ -57,11 +57,13 @@ from airflow.api_fastapi.core_api.openapi.exceptions import create_openapi_http_
 from airflow.api_fastapi.core_api.services.public.dag_run import patch_dag_run_note
 from airflow.api_fastapi.execution_api.datamodels.task_arg_binding import get_arg_bindings_adapter
 from airflow.api_fastapi.execution_api.datamodels.taskinstance import (
+    DagRun as DRDataModel,
     DagRunNoteUpdatePayload,
     InactiveAssetsResponse,
     PreviousTIResponse,
     PrevSuccessfulDagRunResponse,
     TaskBreadcrumbsResponse,
+    TaskInstance as TIDataModel,
     TaskStatesResponse,
     TerminalStateNonSuccess,
     TIAwaitingInputStatePayload,
@@ -73,8 +75,10 @@ from airflow.api_fastapi.execution_api.datamodels.taskinstance import (
     TIRunContext,
     TISkippedDownstreamTasksStatePayload,
     TIStateUpdate,
+    TIStateUpdateParams,
     TISuccessStatePayload,
     TITerminalStatePayload,
+    task_instance_to_runtime,
 )
 from airflow.api_fastapi.execution_api.datamodels.token import ExecutionToken, TIToken
 from airflow.api_fastapi.execution_api.deps import DepContainer
@@ -445,6 +449,9 @@ def ti_run(
     return context
 
 
+_DEFAULT_STATE_UPDATE_PARAMS = TIStateUpdateParams()
+
+
 @ti_id_router.patch(
     "/{task_instance_id}/state",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -462,6 +469,7 @@ def ti_update_state(
     ti_patch_payload: Annotated[TIStateUpdate, Body()],
     session: SessionDep,
     dag_bag: DagBagDep,
+    params: Annotated[TIStateUpdateParams, Query()] = _DEFAULT_STATE_UPDATE_PARAMS,
 ):
     """
     Update the state of a TaskInstance.
@@ -722,6 +730,14 @@ def ti_update_state(
     # https://fastapi.tiangolo.com/tutorial/handling-errors/#install-custom-exception-handlers
     try:
         result = session.execute(query)
+        if params.request_callbacks and updated_state in _STATES_WITH_TASK_CALLBACKS:
+            # Before the retry row replaces this try, so the request describes the try that ended.
+            ti = session.scalar(select(TI).where(TI.id == task_instance_id))
+            if ti is not None:
+                try:
+                    _request_task_callbacks(ti, updated_state, session=session, dag_bag=dag_bag)
+                except Exception:
+                    log.exception("Failed to request the task callbacks; the state update stands")
         if (
             isinstance(ti_patch_payload, TIRetryStatePayload)
             and updated_state == TaskInstanceState.UP_FOR_RETRY
@@ -862,6 +878,60 @@ def _emit_task_span(ti, state, *, resolver: TaskCoordinateResolver):
         status_code = StatusCode.OK if state == TaskInstanceState.SUCCESS else StatusCode.ERROR
         span.set_status(status_code)
         span.end()
+
+
+_STATES_WITH_TASK_CALLBACKS = {
+    TaskInstanceState.SUCCESS: "has_on_success_callback",
+    TaskInstanceState.FAILED: "has_on_failure_callback",
+    TaskInstanceState.UP_FOR_RETRY: "has_on_retry_callback",
+}
+
+
+def _request_task_callbacks(
+    ti: TI, state: TaskInstanceState, *, session: SessionDep, dag_bag: DagBagDep
+) -> None:
+    """
+    Queue the task callbacks of *state* for the Dag processor, for a task whose worker could not run them.
+
+    A task that a language SDK runtime runs declares its callbacks in the Python Dag file, which only
+    the Dag processor can import. The request is the one the scheduler sends for a task killed externally.
+    """
+    from airflow.callbacks.callback_requests import TaskCallbackRequest
+    from airflow.callbacks.database_callback_sink import DatabaseCallbackSink
+    from airflow.models.dag_version import _resolve_ti_callback_bundle_info
+
+    task = None
+    if (dag := dag_bag.get_dag_for_run(dag_run=ti.dag_run, session=session)) is not None:
+        with contextlib.suppress(TaskNotFound):
+            task = dag.get_task(ti.task_id)
+    if task is None:
+        log.warning("Task not found in its Dag; not requesting its callbacks", task_id=ti.task_id)
+        return
+    if not getattr(task, _STATES_WITH_TASK_CALLBACKS[state]):
+        return
+    if (relative_fileloc := ti.dag_model.relative_fileloc) is None:
+        log.warning("Dag has no file path; not requesting the task callbacks", dag_id=ti.dag_id)
+        return
+    bundle_name, bundle_version, version_data = _resolve_ti_callback_bundle_info(ti)
+    request = TaskCallbackRequest(
+        filepath=relative_fileloc,
+        bundle_name=bundle_name,
+        bundle_version=bundle_version,
+        version_data=version_data,
+        ti=task_instance_to_runtime(
+            ti, model=TIDataModel, map_index=TaskCoordinateResolver(dag_bag, session).public_map_index(ti)
+        ),
+        task_callback_type=state,
+        context_from_server=TIRunContext(
+            dag_run=DRDataModel.model_validate(ti.dag_run, from_attributes=True),
+            max_tries=ti.max_tries,
+            variables=[],
+            connections=[],
+            xcom_keys_to_clear=[],
+        ),
+    )
+    log.info("Requesting the task callbacks from the Dag processor", callback_type=state)
+    DatabaseCallbackSink().send(callback=request, session=session)
 
 
 def _handle_fail_fast_for_dag(ti: TI, dag_id: str, session: SessionDep, dag_bag: DagBagDep) -> None:

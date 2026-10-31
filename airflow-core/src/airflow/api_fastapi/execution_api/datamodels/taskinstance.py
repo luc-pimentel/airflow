@@ -147,6 +147,13 @@ class TISuccessStatePayload(StrictBaseModel):
     loop_decision: LoopDecisionPayload | None = None
 
 
+class TIStateUpdateParams(BaseModel):
+    """Query parameters of a state update, kept out of the payloads a language SDK runtime also sends."""
+
+    request_callbacks: bool = False
+    """Whether the worker could not run the task's callbacks, so the Dag processor runs them."""
+
+
 class TITargetStatePayload(StrictBaseModel):
     """Schema for updating TaskInstance to a target state, excluding terminal and running states."""
 

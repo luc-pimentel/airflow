@@ -84,6 +84,7 @@ from tests_common.test_utils.asserts import assert_queries_count, capture_orm_se
 from tests_common.test_utils.config import conf_vars
 from tests_common.test_utils.db import (
     clear_db_assets,
+    clear_db_callbacks,
     clear_db_dags,
     clear_db_logs,
     clear_db_runs,
@@ -4729,7 +4730,8 @@ class TestTIUpdateState:
     def test_ti_update_state_requests_the_callbacks_the_worker_did_not_run(
         self, client, session, dag_maker, state, callback, callback_type
     ):
-        """A final state reported with callbacks_ran=False queues the task's callback for the Dag processor."""
+        """A final state reported with request_callbacks queues the task's callback for the Dag processor."""
+        clear_db_callbacks()
         with dag_maker(dag_id="test_callbacks_not_run", serialized=True):
             EmptyOperator(task_id="stub", **{callback: lambda context: None})
 
@@ -4742,7 +4744,8 @@ class TestTIUpdateState:
 
         response = client.patch(
             f"/execution/task-instances/{ti_id}/state",
-            json={"state": state, "end_date": DEFAULT_END_DATE.isoformat(), "callbacks_ran": False},
+            params={"request_callbacks": "true"},
+            json={"state": state, "end_date": DEFAULT_END_DATE.isoformat()},
         )
 
         assert response.status_code == 204
@@ -4757,6 +4760,7 @@ class TestTIUpdateState:
         assert request.context_from_server.dag_run.run_id == dr.run_id
 
     def test_ti_update_state_requests_no_callback_the_task_does_not_declare(self, client, session, dag_maker):
+        clear_db_callbacks()
         with dag_maker(dag_id="test_callbacks_not_declared", serialized=True):
             EmptyOperator(task_id="stub", on_success_callback=lambda context: None)
 
@@ -4768,7 +4772,8 @@ class TestTIUpdateState:
 
         response = client.patch(
             f"/execution/task-instances/{ti.id}/state",
-            json={"state": "failed", "end_date": DEFAULT_END_DATE.isoformat(), "callbacks_ran": False},
+            params={"request_callbacks": "true"},
+            json={"state": "failed", "end_date": DEFAULT_END_DATE.isoformat()},
         )
 
         assert response.status_code == 204
@@ -4777,8 +4782,9 @@ class TestTIUpdateState:
         assert session.get(TaskInstance, ti.id).state == State.FAILED
 
     def test_ti_update_state_leaves_the_callbacks_to_the_worker_by_default(self, client, session, dag_maker):
-        """Without the flag the Dag is not loaded and nothing is queued: the task process ran its callbacks."""
-        with dag_maker(dag_id="test_callbacks_ran", serialized=True):
+        """Without the parameter the Dag is not loaded and nothing is queued: the task process ran its callbacks."""
+        clear_db_callbacks()
+        with dag_maker(dag_id="test_callbacks_in_worker", serialized=True):
             EmptyOperator(task_id="task", on_success_callback=lambda context: None)
 
         dr = dag_maker.create_dagrun()

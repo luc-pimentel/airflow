@@ -447,9 +447,9 @@ release that shipped it. See the legend below the tables for what each mark mean
      - ✗
      - ✗
    * - ``task-callbacks`` (MAY)
-     - ✗
-     - ✗
-     - ✗
+     - ✓
+     - ✓
+     - ✓
 
 *Marks:* ``✓`` supported (with the SDK release that shipped it, when known) · ``✗`` not supported · ``n/a`` not applicable · ``n/p`` not published. A tier marked ``†`` applies only when ``dag-definition-authoring`` is supported.
 

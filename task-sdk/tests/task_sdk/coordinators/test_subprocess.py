@@ -1042,10 +1042,10 @@ class TestPopenActivitySubprocessTaskCallbacks:
         with patch.object(_PopenActivitySubprocess, "send_msg", autospec=True):
             yield proc
 
-    def test_success_reports_that_the_callbacks_did_not_run(self, proc):
+    def test_success_requests_the_callbacks(self, proc):
         proc._handle_request(SucceedTask(end_date=self.END_DATE), log=MagicMock(), req_id=1)
 
-        assert proc.client.task_instances.succeed.call_args.kwargs["callbacks_ran"] is False
+        assert proc.client.task_instances.succeed.call_args.kwargs["request_callbacks"] is True
 
     @pytest.mark.parametrize(
         ("msg", "method"),
@@ -1054,23 +1054,23 @@ class TestPopenActivitySubprocessTaskCallbacks:
             pytest.param(RetryTask(end_date=END_DATE), "retry", id="up_for_retry"),
         ],
     )
-    def test_failure_and_retry_report_that_the_callbacks_did_not_run(self, proc, msg, method):
+    def test_failure_and_retry_request_the_callbacks(self, proc, msg, method):
         proc._handle_request(msg, log=MagicMock(), req_id=1)
         proc._exit_code = 0
 
         proc.update_task_state_if_needed()
 
-        assert getattr(proc.client.task_instances, method).call_args.kwargs["callbacks_ran"] is False
+        assert getattr(proc.client.task_instances, method).call_args.kwargs["request_callbacks"] is True
 
-    def test_a_runtime_that_exits_without_a_state_reports_that_the_callbacks_did_not_run(self, proc):
+    def test_a_runtime_that_exits_without_a_state_requests_the_callbacks(self, proc):
         proc._exit_code = 1
 
         proc.update_task_state_if_needed()
 
         assert proc.client.task_instances.finish.call_args.kwargs["state"] == TaskInstanceState.FAILED
-        assert proc.client.task_instances.finish.call_args.kwargs["callbacks_ran"] is False
+        assert proc.client.task_instances.finish.call_args.kwargs["request_callbacks"] is True
 
-    def test_a_python_task_process_says_nothing_about_its_callbacks(self):
+    def test_a_python_task_process_runs_its_own_callbacks(self):
         proc = ActivitySubprocess(
             process_log=MagicMock(),
             id=uuid7(),
@@ -1082,7 +1082,7 @@ class TestPopenActivitySubprocessTaskCallbacks:
         with patch.object(ActivitySubprocess, "send_msg", autospec=True):
             proc._handle_request(SucceedTask(end_date=self.END_DATE), log=MagicMock(), req_id=1)
 
-        assert "callbacks_ran" not in proc.client.task_instances.succeed.call_args.kwargs
+        assert "request_callbacks" not in proc.client.task_instances.succeed.call_args.kwargs
 
 
 # This script connects back to the supervisor the way a language SDK runtime does, then waits for

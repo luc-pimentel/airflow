@@ -250,6 +250,11 @@ def _log_and_trace_retry(retry_state) -> None:
         )
 
 
+def _request_callbacks_params(request_callbacks: bool) -> dict[str, str] | None:
+    """Query parameters of a final-state report; a worker that could not run the task's callbacks says so."""
+    return {"request_callbacks": "true"} if request_callbacks else None
+
+
 class TaskInstanceOperations:
     __slots__ = ("client",)
 
@@ -283,8 +288,14 @@ class TaskInstanceOperations:
         *,
         pid: int | None = None,
         loop_decision: LoopDecisionPayload | None = None,
+        request_callbacks: bool = False,
     ):
-        """Report a terminal outcome or acknowledge server-requested termination."""
+        """
+        Report a terminal outcome or acknowledge server-requested termination.
+
+        ``request_callbacks`` tells the server that the task's callbacks did not run in the worker, so the
+        Dag processor runs them.
+        """
         if state == TaskInstanceState.SUCCESS:
             raise ValueError("Logic error. SUCCESS state should call the `succeed` function instead")
         body = TITerminalStatePayload(
@@ -298,7 +309,11 @@ class TaskInstanceOperations:
         if state == TerminalStateNonSuccess.SERVER_TERMINATED:
             body.hostname = get_hostname()
             body.pid = pid
-        self.client.patch(f"task-instances/{id}/state", content=body.model_dump_json(exclude_unset=True))
+        self.client.patch(
+            f"task-instances/{id}/state",
+            content=body.model_dump_json(exclude_unset=True),
+            params=_request_callbacks_params(request_callbacks),
+        )
 
     def retry(
         self,
@@ -307,6 +322,8 @@ class TaskInstanceOperations:
         rendered_map_index,
         retry_delay_seconds: float | None = None,
         retry_reason: str | None = None,
+        *,
+        request_callbacks: bool = False,
     ):
         """Tell the API server that this TI has failed and reached a up_for_retry state."""
         body = TIRetryStatePayload(
@@ -315,7 +332,11 @@ class TaskInstanceOperations:
             retry_delay_seconds=retry_delay_seconds,
             retry_reason=retry_reason,
         )
-        self.client.patch(f"task-instances/{id}/state", content=body.model_dump_json())
+        self.client.patch(
+            f"task-instances/{id}/state",
+            content=body.model_dump_json(),
+            params=_request_callbacks_params(request_callbacks),
+        )
 
     def succeed(
         self,
@@ -326,6 +347,7 @@ class TaskInstanceOperations:
         rendered_map_index,
         *,
         loop_decision: LoopDecisionPayload | None = None,
+        request_callbacks: bool = False,
     ):
         """Tell the API server that this TI has succeeded."""
         body = TISuccessStatePayload(
@@ -335,7 +357,11 @@ class TaskInstanceOperations:
             rendered_map_index=rendered_map_index,
             loop_decision=loop_decision,
         )
-        self.client.patch(f"task-instances/{id}/state", content=body.model_dump_json())
+        self.client.patch(
+            f"task-instances/{id}/state",
+            content=body.model_dump_json(),
+            params=_request_callbacks_params(request_callbacks),
+        )
 
     def defer(self, id: uuid.UUID, msg):
         """Tell the API server that this TI has been deferred."""

@@ -18,37 +18,48 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 
+from airflow.models.callback import DagProcessorCallback
 from airflow.utils.state import State
+
+from tests_common.test_utils.db import clear_db_callbacks
 
 pytestmark = pytest.mark.db_test
 
 TIMESTAMP_STR = "2024-09-30T12:00:00Z"
-
-FINAL_STATE_PAYLOADS = ["TISuccessStatePayload", "TITerminalStatePayload", "TIRetryStatePayload"]
+STATE_PATH = "/task-instances/{task_instance_id}/state"
 
 
 @pytest.mark.parametrize("version", ["2026-06-30", "2026-10-30"])
-def test_old_api_omits_callbacks_ran_from_schema(client, version):
-    """The callbacks_ran field did not exist before the 2027-02-28 API version."""
+def test_old_api_omits_request_callbacks_from_schema(client, version):
+    """The request_callbacks query parameter did not exist before the 2027-02-28 API version."""
     response = client.get(f"/execution/openapi.json?version={version}")
     assert response.status_code == 200
-    schemas = response.json()["components"]["schemas"]
-    for payload in FINAL_STATE_PAYLOADS:
-        assert "callbacks_ran" not in schemas[payload]["properties"], payload
+    parameters = response.json()["paths"][STATE_PATH]["patch"]["parameters"]
+    assert "request_callbacks" not in {parameter["name"] for parameter in parameters}
+
+
+def test_head_api_has_request_callbacks_in_schema(client):
+    response = client.get("/execution/openapi.json?version=2027-02-28")
+    assert response.status_code == 200
+    parameters = response.json()["paths"][STATE_PATH]["patch"]["parameters"]
+    assert "request_callbacks" in {parameter["name"] for parameter in parameters}
 
 
 @pytest.mark.parametrize("state", ["success", "failed", "up_for_retry"])
-def test_old_api_rejects_callbacks_ran(client, session, create_task_instance, state):
+def test_old_api_ignores_request_callbacks(client, session, create_task_instance, state):
+    """An old worker never sends the parameter; a stray one changes nothing in an old API version."""
+    clear_db_callbacks()
     ti = create_task_instance(task_id="legacy_final_state", state=State.RUNNING)
     session.commit()
     client.headers["Airflow-API-Version"] = "2026-10-30"
 
     response = client.patch(
-        f"/execution/task-instances/{ti.id}/state",
-        json={"state": state, "end_date": TIMESTAMP_STR, "callbacks_ran": False},
+        f"/execution{STATE_PATH.format(task_instance_id=ti.id)}",
+        params={"request_callbacks": "true"},
+        json={"state": state, "end_date": TIMESTAMP_STR},
     )
 
-    assert response.status_code == 422
-    session.refresh(ti)
-    assert ti.state == State.RUNNING
+    assert response.status_code == 204
+    assert session.scalars(select(DagProcessorCallback)).all() == []

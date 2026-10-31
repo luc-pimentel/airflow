@@ -1690,6 +1690,9 @@ class ActivitySubprocess(WatchedSubprocess):
 
     ti: RuntimeTI | None = None
 
+    runs_task_callbacks: ClassVar[bool] = True
+    """Whether the task process runs the task's callbacks itself; otherwise the server has them run."""
+
     @classmethod
     def start(  # type: ignore[override]
         cls,
@@ -1858,7 +1861,13 @@ class ActivitySubprocess(WatchedSubprocess):
                 state=self.final_state,
                 when=datetime.now(tz=UTC),
                 rendered_map_index=self._rendered_map_index,
+                **self._callbacks_report,
             )
+
+    @property
+    def _callbacks_report(self) -> dict[str, bool]:
+        """What a final-state report says about the task's callbacks: nothing, unless this process cannot run them."""
+        return {} if self.runs_task_callbacks else {"request_callbacks": True}
 
     def _send_terminal_state_msg(
         self, msg: TaskState | SucceedTask | RetryTask | DeferTask | RescheduleTask | AwaitInputTask
@@ -1876,6 +1885,7 @@ class ActivitySubprocess(WatchedSubprocess):
                     rendered_map_index=self._rendered_map_index,
                     retry_reason=msg.retry_reason,
                     loop_decision=msg.loop_decision,
+                    **self._callbacks_report,
                 )
             elif isinstance(msg, SucceedTask):
                 self.client.task_instances.succeed(
@@ -1885,6 +1895,7 @@ class ActivitySubprocess(WatchedSubprocess):
                     outlet_events=msg.outlet_events,
                     rendered_map_index=self._rendered_map_index,
                     loop_decision=msg.loop_decision,
+                    **self._callbacks_report,
                 )
             elif isinstance(msg, RetryTask):
                 self.client.task_instances.retry(
@@ -1893,6 +1904,7 @@ class ActivitySubprocess(WatchedSubprocess):
                     rendered_map_index=self._rendered_map_index,
                     retry_delay_seconds=getattr(msg, "retry_delay_seconds", None),
                     retry_reason=getattr(msg, "retry_reason", None),
+                    **self._callbacks_report,
                 )
             elif isinstance(msg, DeferTask):
                 self.client.task_instances.defer(self.id, msg)
@@ -3075,9 +3087,14 @@ def _fail_task_before_runtime(
     try:
         end_date = datetime.now(tz=UTC)
         try:
+            # The runtime never ran, so neither did the task's callbacks: the Dag processor runs them.
             if error.retryable and ti_context.should_retry:
                 client.task_instances.retry(
-                    ti.id, end_date=end_date, rendered_map_index=None, retry_reason=reason[:500]
+                    ti.id,
+                    end_date=end_date,
+                    rendered_map_index=None,
+                    retry_reason=reason[:500],
+                    request_callbacks=True,
                 )
             else:
                 client.task_instances.finish(
@@ -3086,6 +3103,7 @@ def _fail_task_before_runtime(
                     when=end_date,
                     rendered_map_index=None,
                     retry_reason=reason[:500],
+                    request_callbacks=True,
                 )
         except ServerResponseError as e:
             if e.response.status_code != HTTPStatus.CONFLICT:

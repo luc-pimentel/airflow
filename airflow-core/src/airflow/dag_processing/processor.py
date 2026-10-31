@@ -440,10 +440,22 @@ def _execute_dag_callbacks(dagbag: DagBag, request: DagCallbackRequest, log: Fil
             )
 
 
+# The task callback each requested state runs; a request without a state is a failure, as before.
+_TASK_CALLBACKS_BY_STATE = {
+    None: "on_failure_callback",
+    TaskInstanceState.FAILED: "on_failure_callback",
+    TaskInstanceState.UPSTREAM_FAILED: "on_failure_callback",
+    TaskInstanceState.UP_FOR_RETRY: "on_retry_callback",
+    TaskInstanceState.SUCCESS: "on_success_callback",
+}
+
+
 def _execute_task_callbacks(dagbag: DagBag, request: TaskCallbackRequest, log: FilteringBoundLogger) -> None:
-    if not request.is_failure_callback:
+    callback_attr = _TASK_CALLBACKS_BY_STATE.get(request.task_callback_type)
+    if callback_attr is None:
         log.warning(
-            "Task callback requested but is not a failure callback",
+            "Task callback requested for a state that has no task callback",
+            state=request.task_callback_type,
             dag_id=request.ti.dag_id,
             task_id=request.ti.task_id,
             run_id=request.ti.run_id,
@@ -456,10 +468,7 @@ def _execute_task_callbacks(dagbag: DagBag, request: TaskCallbackRequest, log: F
     if TYPE_CHECKING:
         assert task is not None
 
-    if request.task_callback_type is TaskInstanceState.UP_FOR_RETRY:
-        callbacks = task.on_retry_callback
-    else:
-        callbacks = task.on_failure_callback
+    callbacks = getattr(task, callback_attr)
 
     if not callbacks:
         log.warning(
